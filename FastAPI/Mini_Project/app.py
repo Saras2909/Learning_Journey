@@ -1,7 +1,9 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException,UploadFile,File
 from pydantic import BaseModel, Field
+from fastapi.responses import StreamingResponse
 import joblib
 import pandas as pd
+import io
 
 app = FastAPI()
 house_model = joblib.load("house_model.pkl")
@@ -58,5 +60,51 @@ def predict(Features: Housefeatures):
             detail=f"Prediction Failed Due To : {str(e)}"
         )
 
-
+@app.post("/predict_file")
+async def predict_file(file: UploadFile = File(...)): # Upload file is an object, async means python can work on something else while it waits
+    if file.filename.endswith(".csv"):
+        contents = await file.read() 
+        df = pd.read_csv(io.BytesIO(contents)) # bytes io is used to read the binary content of the file into pandas read_csv
+        required_features = features
+        missing_feature = [
+            feature for feature in required_features if feature not in df.columns # Columns which are required by model but not in the input file
+        ]
+        extra_feature = [
+            feature for feature in df.columns if feature not in required_features # Extra features present in the input file which are not required by model
+        ]
+        if missing_feature:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Missing features: {', '.join(missing_feature)} not in input file"
+            )
+        if extra_feature:
+            raise HTTPException(   
+                status_code=400,
+                detail=f"Extra features: {', '.join(extra_feature)}"
+            )
+        if len(df) == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Input file is empty"
+            )
+        try:
+            prediction = house_model.predict(df[features])
+            df["Predicted Price"] = (prediction * 100000)
+            df["Predicted Price"] = df["Predicted Price"].apply(lambda x : f"${x:,.0f}")
+            output = df.to_csv(index = False)
+            return StreamingResponse(
+                io.StringIO(output),
+                media_type = "text/csv",
+                headers= {"Content-Disposition": "attachment; filename=predictions.csv"}
+            )
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Prediction Failed Due To : {str(e)}"
+            )
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Input file must be a CSV file"
+        )
 
